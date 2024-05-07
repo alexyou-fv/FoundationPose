@@ -21,7 +21,8 @@ class FoundationPose:
     self.ignore_normal_flip = True
     self.debug = debug
     self.debug_dir = debug_dir
-    os.makedirs(debug_dir, exist_ok=True)
+    if self.debug:
+      os.makedirs(debug_dir, exist_ok=True)
 
     self.reset_object(model_pts, model_normals, symmetry_tfs=symmetry_tfs, mesh=mesh)
     self.make_rotation_grid(min_n_views=40, inplane_step=60)
