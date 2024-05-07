@@ -13,6 +13,7 @@ import numpy as np
 import trimesh
 import sys
 from scipy.spatial.transform import Rotation
+import yaml
 
 def imgmsg_to_cv2_rgb(img_msg):
     '''
@@ -44,7 +45,12 @@ def imgmsg_to_cv2_depth(img_msg):
 
 class DishPoseEstimator:
 
-    def __init__(self, img_topic, aligned_depth_topic, cam_info_topic, model_directory):
+    def __init__(self, img_topic, aligned_depth_topic, cam_info_topic, model_directory,
+                 model_up_axis=1, world_plane=(0,0,1)):
+
+        # Params regarding semantic description of models/outputpose
+        self.model_up_axis = model_up_axis      # Which axis in the model corresponds to the up direction?
+        self.world_plane = world_plane          # Normal vector defining side-to-side movement
 
         self.scorer = ScorePredictor()
         self.refiner = PoseRefinePredictor()
@@ -52,9 +58,15 @@ class DishPoseEstimator:
 
         # Load in models to be analyzed
         self.models = {}
+        with open(os.path.join(model_directory, 'semantics.yaml'), 'r') as fh:
+            self.model_semantics = yaml.safe_load(fh)
+
         for file in os.listdir(model_directory):
-            if 'IGNORE' in file:
+            if 'IGNORE' in file or 'semantics' in file:
                 continue
+
+            if file not in self.model_semantics:
+                print("{} isn't in the semantics file, will not attempt to load".format(file))
 
             model_path = os.path.join(model_directory, file)
             try:
@@ -83,7 +95,37 @@ class DishPoseEstimator:
         self.pose_pub = rospy.Publisher('/tracked_pose', PoseStamped, queue_size=1)
         self.timer = rospy.Timer(rospy.Duration(0.2), self.update_tracking)
 
-    def publish_tf_pose(self, tf, stamp=None):
+    def reorient_pose(self, tf):
+
+        # Reorients the computed pose based on the semantics
+        up_axis = tf[:3,self.model_up_axis]
+        side_axis_raw = self.world_plane
+        fwd_axis = np.cross(side_axis_raw, up_axis)
+        fwd_axis = fwd_axis / np.linalg.norm(fwd_axis)
+        side_axis = np.cross(up_axis, fwd_axis)
+
+        new_tf = tf.copy()
+        new_tf[:3,0] = fwd_axis
+        new_tf[:3,1] = side_axis
+        new_tf[:3,2] = up_axis
+
+        # Use the model semantics to transform the frame to the edge of the cup
+        active_model = os.path.split(self.active_model)[-1]
+        info = self.model_semantics[active_model]
+        height_offset = info.get('height_offset', 0.0)
+        if info['shape'] == 'circular':
+            offset_homog = np.array([info['radius'], 0, height_offset, 1.0])
+            new_tf[:3,3] = (new_tf @ offset_homog)[:3]
+        else:
+            raise ValueError("Unknown model semantic value {}".format(info['shape']))
+
+        return new_tf
+
+    def publish_tf_pose(self, tf, stamp=None, reorient=True):
+
+        if reorient:
+            tf = self.reorient_pose(tf)
+
         self.pose_pub.publish(self.convert_tf_mat_to_pose(tf, stamp=stamp))
 
     def convert_tf_mat_to_pose(self, tf, stamp=None):
@@ -214,6 +256,9 @@ class DishPoseEstimator:
 
 
 if __name__ == '__main__':
+
+    # See here for existing models and semantics
+    # https://drive.google.com/drive/folders/17rlwbM6ekuNZfsmVwbC0m-qQxVsRfj3b?usp=sharing
 
     rospy.init_node("dish_pose_estimator")
 
